@@ -120,41 +120,48 @@ export function toDbRemoteDocument(
   localSerializer: LocalSerializer,
   document: MutableDocument
 ): DbRemoteDocument {
-  const dbReadTime = toDbTimestampKey(document.readTime);
-  const parentPath = document.key.path.popLast().toArray();
+  const readTime = toDbTimestampKey(document.readTime);
+  const prefixPath = document.key.getCollectionPath().popLast().toArray();
+  const collectionGroup = document.key.collectionGroup;
+  const documentId = document.key.path.lastSegment();
   if (document.isFoundDocument()) {
     const doc = toDocument(localSerializer.remoteSerializer, document);
     const hasCommittedMutations = document.hasCommittedMutations;
     return new DbRemoteDocument(
+      prefixPath,
+      collectionGroup,
+      documentId,
+      readTime,
       /* unknownDocument= */ null,
       /* noDocument= */ null,
       doc,
-      hasCommittedMutations,
-      dbReadTime,
-      parentPath
+      hasCommittedMutations
     );
   } else if (document.isNoDocument()) {
     const path = document.key.path.toArray();
     const version = toDbTimestamp(document.version);
     const hasCommittedMutations = document.hasCommittedMutations;
     return new DbRemoteDocument(
+      prefixPath,
+      collectionGroup,
+      documentId,
+      readTime,
       /* unknownDocument= */ null,
       new DbNoDocument(path, version),
       /* document= */ null,
-      hasCommittedMutations,
-      dbReadTime,
-      parentPath
+      hasCommittedMutations
     );
   } else if (document.isUnknownDocument()) {
     const path = document.key.path.toArray();
-    const readTime = toDbTimestamp(document.version);
     return new DbRemoteDocument(
-      new DbUnknownDocument(path, readTime),
+      prefixPath,
+      collectionGroup,
+      documentId,
+      readTime,
+      new DbUnknownDocument(path, toDbTimestamp(document.version)),
       /* noDocument= */ null,
       /* document= */ null,
-      /* hasCommittedMutations= */ true,
-      dbReadTime,
-      parentPath
+      /* hasCommittedMutations= */ true
     );
   } else {
     return fail('Unexpected Document ' + document);
@@ -175,7 +182,7 @@ export function fromDbTimestampKey(
   return SnapshotVersion.fromTimestamp(timestamp);
 }
 
-function toDbTimestamp(snapshotVersion: SnapshotVersion): DbTimestamp {
+export function toDbTimestamp(snapshotVersion: SnapshotVersion): DbTimestamp {
   const timestamp = snapshotVersion.toTimestamp();
   return new DbTimestamp(timestamp.seconds, timestamp.nanoseconds);
 }

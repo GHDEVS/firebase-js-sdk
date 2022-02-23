@@ -25,7 +25,7 @@ import {
   IndexKind,
   IndexOffset,
   indexOffsetComparator,
-  newIndexOffsetSuccessorFromReadTime
+  newIndexOffsetSuccessor
 } from '../../../src/model/field_index';
 import { fieldIndex, key, version } from '../../util/helpers';
 
@@ -118,9 +118,9 @@ describe('index offset', () => {
   it('supports comparison', () => {
     const docAOffset = new IndexOffset(version(1), key('foo/a'), -1);
     const docBOffset = new IndexOffset(version(1), key('foo/b'), -1);
-    const version1Offset = newIndexOffsetSuccessorFromReadTime(version(1), -1);
+    const version1Offset = newIndexOffsetSuccessor(version(1), -1);
     const docCOffset = new IndexOffset(version(2), key('foo/c'), -1);
-    const version2Offset = newIndexOffsetSuccessorFromReadTime(version(2), -1);
+    const version2Offset = newIndexOffsetSuccessor(version(2), -1);
 
     expect(indexOffsetComparator(docAOffset, docBOffset)).to.equal(-1);
     expect(indexOffsetComparator(docAOffset, version1Offset)).to.equal(-1);
@@ -130,7 +130,7 @@ describe('index offset', () => {
   });
 
   it('advances seconds', () => {
-    const actualSuccessor = newIndexOffsetSuccessorFromReadTime(
+    const actualSuccessor = newIndexOffsetSuccessor(
       SnapshotVersion.fromTimestamp(new Timestamp(1, 1e9 - 1)),
       -1
     );

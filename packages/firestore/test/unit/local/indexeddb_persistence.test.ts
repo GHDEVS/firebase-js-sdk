@@ -36,6 +36,7 @@ import {
   DbMutationBatchKey,
   DbMutationQueue,
   DbMutationQueueKey,
+  DbNoDocument,
   DbPrimaryClient,
   DbPrimaryClientKey,
   DbRemoteDocument,
@@ -49,9 +50,10 @@ import {
   DbTargetGlobalKey,
   DbTargetKey,
   DbTimestamp,
+  DbUnknownDocument,
   SCHEMA_VERSION,
   V12_STORES,
-  V13_STORES,
+  V14_STORES,
   V1_STORES,
   V3_STORES,
   V4_STORES,
@@ -60,9 +62,15 @@ import {
 } from '../../../src/local/indexeddb_schema';
 import { SchemaConverter } from '../../../src/local/indexeddb_schema_converter';
 import {
+  DbRemoteDocument as DbRemoteDocumentLegacy,
+  DbRemoteDocumentKey as DbRemoteDocumentKeyLegacy
+} from '../../../src/local/indexeddb_schema_legacy';
+import {
   fromDbTarget,
+  LocalSerializer,
   toDbRemoteDocument,
   toDbTarget,
+  toDbTimestamp,
   toDbTimestampKey
 } from '../../../src/local/local_serializer';
 import { LruParams } from '../../../src/local/lru_garbage_collector';
@@ -70,9 +78,14 @@ import { PersistencePromise } from '../../../src/local/persistence_promise';
 import { ClientId } from '../../../src/local/shared_client_state';
 import { SimpleDb, SimpleDbTransaction } from '../../../src/local/simple_db';
 import { TargetData, TargetPurpose } from '../../../src/local/target_data';
+import { MutableDocument } from '../../../src/model/document';
 import { getWindow } from '../../../src/platform/dom';
 import { firestoreV1ApiClientInterfaces } from '../../../src/protos/firestore_proto_api';
-import { JsonProtoSerializer } from '../../../src/remote/serializer';
+import {
+  JsonProtoSerializer,
+  toDocument
+} from '../../../src/remote/serializer';
+import { fail } from '../../../src/util/assert';
 import { AsyncQueue, TimerId } from '../../../src/util/async_queue';
 import {
   AsyncQueueImpl,
@@ -212,6 +225,22 @@ async function withForcedPersistence(
   );
 }
 
+function addLegacyDocs(
+  txn: SimpleDbTransaction,
+  keys: string[],
+  version: number
+): PersistencePromise<void> {
+  const remoteDocumentStore = txn.store<
+    DbRemoteDocumentKeyLegacy,
+    DbRemoteDocumentLegacy
+  >(DbRemoteDocument.store);
+  return PersistencePromise.forEach(keys, (key: string) => {
+    const remoteDoc = doc(key, version, { data: 'foo' });
+    const dbRemoteDoc = toLegacyDbRemoteDocument(TEST_SERIALIZER, remoteDoc);
+    return remoteDocumentStore.put(remoteDoc.key.path.toArray(), dbRemoteDoc);
+  });
+}
+
 function addDocs(
   txn: SimpleDbTransaction,
   keys: string[],
@@ -223,7 +252,7 @@ function addDocs(
   return PersistencePromise.forEach(keys, (key: string) => {
     const remoteDoc = doc(key, version, { data: 'foo' });
     const dbRemoteDoc = toDbRemoteDocument(TEST_SERIALIZER, remoteDoc);
-    return remoteDocumentStore.put(remoteDoc.key.path.toArray(), dbRemoteDoc);
+    return remoteDocumentStore.put(dbRemoteDoc);
   });
 }
 
@@ -578,7 +607,7 @@ describe('IndexedDbSchema: createOrUpgradeDb', () => {
       ];
       const dbRemoteDocs = docs.map(doc => ({
         dbKey: doc.key.path.toArray(),
-        dbDoc: toDbRemoteDocument(TEST_SERIALIZER, doc)
+        dbDoc: toLegacyDbRemoteDocument(TEST_SERIALIZER, doc)
       }));
       // V5 stores doesn't exist
       return db.runTransaction(
@@ -586,13 +615,19 @@ describe('IndexedDbSchema: createOrUpgradeDb', () => {
         'readwrite',
         V4_STORES,
         txn => {
-          const store = txn.store<DbRemoteDocumentKey, DbRemoteDocument>(
-            DbRemoteDocument.store
-          );
+          const store = txn.store<
+            DbRemoteDocumentKeyLegacy,
+            DbRemoteDocumentLegacy
+          >(DbRemoteDocument.store);
           return PersistencePromise.forEach(
             dbRemoteDocs,
-            ({ dbKey, dbDoc }: { dbKey: string[]; dbDoc: DbRemoteDocument }) =>
-              store.put(dbKey, dbDoc)
+            ({
+              dbKey,
+              dbDoc
+            }: {
+              dbKey: string[];
+              dbDoc: DbRemoteDocumentLegacy;
+            }) => store.put(dbKey, dbDoc)
           );
         }
       );
@@ -634,9 +669,9 @@ describe('IndexedDbSchema: createOrUpgradeDb', () => {
             DbTargetGlobal
           >(DbTargetGlobal.store);
           const remoteDocumentStore = txn.store<
-            DbRemoteDocumentKey,
-            DbRemoteDocument
-          >(DbRemoteDocument.store);
+            DbRemoteDocumentKeyLegacy,
+            DbRemoteDocumentLegacy
+          >(DbRemoteDocumentLegacy.store);
           const targetDocumentStore = txn.store<
             DbTargetDocumentKey,
             DbTargetDocument
@@ -657,7 +692,7 @@ describe('IndexedDbSchema: createOrUpgradeDb', () => {
                 promises.push(
                   remoteDocumentStore.put(
                     document.key.path.toArray(),
-                    toDbRemoteDocument(serializer, document)
+                    toLegacyDbRemoteDocument(serializer, document)
                   )
                 );
                 if (i % 2 === 1) {
@@ -741,9 +776,9 @@ describe('IndexedDbSchema: createOrUpgradeDb', () => {
         V6_STORES,
         txn => {
           const remoteDocumentStore = txn.store<
-            DbRemoteDocumentKey,
-            DbRemoteDocument
-          >(DbRemoteDocument.store);
+            DbRemoteDocumentKeyLegacy,
+            DbRemoteDocumentLegacy
+          >(DbRemoteDocumentLegacy.store);
           const documentMutationStore = txn.store<
             DbDocumentMutationKey,
             DbDocumentMutation
@@ -768,7 +803,7 @@ describe('IndexedDbSchema: createOrUpgradeDb', () => {
                 const remoteDoc = doc(path, /*version=*/ 1, { data: 1 });
                 return remoteDocumentStore.put(
                   remoteDoc.key.path.toArray(),
-                  toDbRemoteDocument(TEST_SERIALIZER, remoteDoc)
+                  toLegacyDbRemoteDocument(TEST_SERIALIZER, remoteDoc)
                 );
               }
             );
@@ -879,9 +914,9 @@ describe('IndexedDbSchema: createOrUpgradeDb', () => {
         V8_STORES,
         txn => {
           const remoteDocumentStore = txn.store<
-            DbRemoteDocumentKey,
-            DbRemoteDocument
-          >(DbRemoteDocument.store);
+            DbRemoteDocumentKeyLegacy,
+            DbRemoteDocumentLegacy
+          >(DbRemoteDocumentLegacy.store);
 
           // Write the remote document entries.
           return PersistencePromise.forEach(
@@ -889,7 +924,7 @@ describe('IndexedDbSchema: createOrUpgradeDb', () => {
             (path: string) => {
               const remoteDoc = doc(path, /*version=*/ 1, { data: 1 });
 
-              const dbRemoteDoc = toDbRemoteDocument(
+              const dbRemoteDoc = toLegacyDbRemoteDocument(
                 TEST_SERIALIZER,
                 remoteDoc
               );
@@ -908,7 +943,7 @@ describe('IndexedDbSchema: createOrUpgradeDb', () => {
     });
 
     // Migrate to v9 and verify that new documents are indexed.
-    await withDb(9, db => {
+    await withDb(14, db => {
       return db.runTransaction(
         this.test!.fullTitle(),
         'readwrite',
@@ -937,18 +972,16 @@ describe('IndexedDbSchema: createOrUpgradeDb', () => {
               // read time.
               const lastReadTime = toDbTimestampKey(version(1));
               const range = IDBKeyRange.lowerBound(
-                [['coll2'], lastReadTime],
+                [[], 'coll2', lastReadTime, ''],
                 true
               );
-              return remoteDocumentStore
-                .loadAll(DbRemoteDocument.collectionReadTimeIndex, range)
-                .next(docsRead => {
-                  const keys = docsRead.map(dbDoc => dbDoc.document!.name);
-                  expect(keys).to.have.members([
-                    'projects/test-project/databases/(default)/documents/coll2/doc3',
-                    'projects/test-project/databases/(default)/documents/coll2/doc4'
-                  ]);
-                });
+              return remoteDocumentStore.loadAll(range).next(docsRead => {
+                const keys = docsRead.map(dbDoc => dbDoc.document!.name);
+                expect(keys).to.have.members([
+                  'projects/test-project/databases/(default)/documents/coll2/doc3',
+                  'projects/test-project/databases/(default)/documents/coll2/doc4'
+                ]);
+              });
             });
         }
       );
@@ -959,11 +992,11 @@ describe('IndexedDbSchema: createOrUpgradeDb', () => {
     const oldDocPaths = ['coll/doc1', 'coll/doc2', 'abc/doc1'];
     const newDocPaths = ['coll/doc3', 'coll/doc4', 'abc/doc2'];
 
-    await withDb(9, db => {
+    await withDb(13, db => {
       return db.runTransaction(
         this.test!.fullTitle(),
         'readwrite',
-        V8_STORES,
+        V12_STORES,
         txn => {
           return addDocs(txn, oldDocPaths, /* version= */ 1).next(() =>
             addDocs(txn, newDocPaths, /* version= */ 2).next(() => {
@@ -972,20 +1005,18 @@ describe('IndexedDbSchema: createOrUpgradeDb', () => {
                 DbRemoteDocument
               >(DbRemoteDocument.store);
 
-              const lastReadTime = toDbTimestampKey(version(1));
+              const lastReadTime = toDbTimestampKey(version(2));
               const range = IDBKeyRange.lowerBound(
-                [['coll'], lastReadTime],
+                [[], 'coll', lastReadTime, ''],
                 true
               );
-              return remoteDocumentStore
-                .loadAll(DbRemoteDocument.collectionReadTimeIndex, range)
-                .next(docsRead => {
-                  const keys = docsRead.map(dbDoc => dbDoc.document!.name);
-                  expect(keys).to.have.members([
-                    'projects/test-project/databases/(default)/documents/coll/doc3',
-                    'projects/test-project/databases/(default)/documents/coll/doc4'
-                  ]);
-                });
+              return remoteDocumentStore.loadAll(range).next(docsRead => {
+                const keys = docsRead.map(dbDoc => dbDoc.document!.name);
+                expect(keys).to.have.members([
+                  'projects/test-project/databases/(default)/documents/coll/doc3',
+                  'projects/test-project/databases/(default)/documents/coll/doc4'
+                ]);
+              });
             })
           );
         }
@@ -997,11 +1028,11 @@ describe('IndexedDbSchema: createOrUpgradeDb', () => {
     const oldDocPaths = ['coll1/old', 'coll2/old'];
     const newDocPaths = ['coll1/new', 'coll2/new'];
 
-    await withDb(9, db => {
+    await withDb(13, db => {
       return db.runTransaction(
         this.test!.fullTitle(),
         'readwrite',
-        V8_STORES,
+        V12_STORES,
         txn => {
           return addDocs(txn, oldDocPaths, /* version= */ 1).next(() =>
             addDocs(txn, newDocPaths, /* version= */ 2).next(() => {
@@ -1040,7 +1071,15 @@ describe('IndexedDbSchema: createOrUpgradeDb', () => {
     await withDb(12, async () => {});
     await withDb(13, async (db, version, objectStores) => {
       expect(version).to.have.equal(13);
-      expect(objectStores).to.have.members(V13_STORES);
+      expect(objectStores).to.have.members(V12_STORES);
+    });
+  });
+
+  it('can upgrade from version 13 to 14', async () => {
+    await withDb(13, async () => {});
+    await withDb(14, async (db, version, objectStores) => {
+      expect(version).to.have.equal(14);
+      expect(objectStores).to.have.members(V14_STORES);
     });
   });
 
@@ -1355,3 +1394,48 @@ describe('IndexedDb', () => {
     });
   });
 });
+
+function toLegacyDbRemoteDocument(
+  localSerializer: LocalSerializer,
+  document: MutableDocument
+): DbRemoteDocumentLegacy {
+  const dbReadTime = toDbTimestampKey(document.readTime);
+  const parentPath = document.key.path.popLast().toArray();
+  if (document.isFoundDocument()) {
+    const doc = toDocument(localSerializer.remoteSerializer, document);
+    const hasCommittedMutations = document.hasCommittedMutations;
+    return new DbRemoteDocumentLegacy(
+      /* unknownDocument= */ null,
+      /* noDocument= */ null,
+      doc,
+      hasCommittedMutations,
+      dbReadTime,
+      parentPath
+    );
+  } else if (document.isNoDocument()) {
+    const path = document.key.path.toArray();
+    const version = toDbTimestamp(document.version);
+    const hasCommittedMutations = document.hasCommittedMutations;
+    return new DbRemoteDocumentLegacy(
+      /* unknownDocument= */ null,
+      new DbNoDocument(path, version),
+      /* document= */ null,
+      hasCommittedMutations,
+      dbReadTime,
+      parentPath
+    );
+  } else if (document.isUnknownDocument()) {
+    const path = document.key.path.toArray();
+    const readTime = toDbTimestamp(document.version);
+    return new DbRemoteDocumentLegacy(
+      new DbUnknownDocument(path, readTime),
+      /* noDocument= */ null,
+      /* document= */ null,
+      /* hasCommittedMutations= */ true,
+      dbReadTime,
+      parentPath
+    );
+  } else {
+    return fail('Unexpected Document ' + document);
+  }
+}

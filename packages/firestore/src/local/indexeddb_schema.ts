@@ -35,7 +35,7 @@ import {
 // TODO(indexing): Remove this constant
 const INDEXING_ENABLED = false;
 
-export const INDEXING_SCHEMA_VERSION = 13;
+export const INDEXING_SCHEMA_VERSION = 14;
 
 /**
  * Schema Version for the Web client:
@@ -56,10 +56,12 @@ export const INDEXING_SCHEMA_VERSION = 13;
  * 10. Rewrite the canonical IDs to the explicit Protobuf-based format.
  * 11. Add bundles and named_queries for bundle support.
  * 12. Add document overlays.
- * 13. Add indexing support.
+ * 13. Rewrite the keys of the remote document cache to allow for efficient
+ *     document lookup via `getAll()`.
+ * 14. Add indexing support.
  */
 
-export const SCHEMA_VERSION = INDEXING_ENABLED ? INDEXING_SCHEMA_VERSION : 12;
+export const SCHEMA_VERSION = INDEXING_ENABLED ? INDEXING_SCHEMA_VERSION : 13;
 
 /**
  * Wrapper class to store timestamps (seconds and nanos) in IndexedDb objects.
@@ -271,10 +273,11 @@ export class DbDocumentMutation {
 }
 
 /**
- * A key in the 'remoteDocuments' object store is a string array containing the
- * segments that make up the path.
+ * A key in the 'remoteDocuments' object store is a array containing the
+ * collection path, the collection group, the read time and the document
+ * id.
  */
-export type DbRemoteDocumentKey = string[];
+export type DbRemoteDocumentKey = [string[], string, DbTimestampKey, string];
 
 /**
  * Represents the known absence of a document at a particular version.
@@ -302,11 +305,17 @@ export class DbUnknownDocument {
  * - An "unknown document" representing a document that is known to exist (at
  * some version) but whose contents are unknown.
  *
+ * The document key maps is the concatenation of prefixPath, collectionGroup
+ * and documentId.
+ *
  * Note: This is the persisted equivalent of a MaybeDocument and could perhaps
  * be made more general if necessary.
  */
 export class DbRemoteDocument {
   static store = 'remoteDocuments';
+
+  /** The primary key of the object store, which allos for efficient access by collection path and read time. */
+  static keyPath = ['prefixPath', 'collectionGroup', 'readTime', 'documentId'];
 
   /**
    * An index that provides access to all entries sorted by read time (which
@@ -318,24 +327,38 @@ export class DbRemoteDocument {
 
   static readTimeIndexPath = 'readTime';
 
+  /** An index that provides access to documents by key. */
+  static documentKeyIndex = 'documentKeyIndex';
+
+  static documentKeyIndexPath = ['prefixPath', 'collectionGroup', 'documentId'];
+
   /**
-   * An index that provides access to documents in a collection sorted by read
+   * An index that provides access to documents by collection group and read
    * time.
    *
-   * This index is used to allow the RemoteDocumentCache to fetch newly changed
-   * documents in a collection.
+   * This index is used by the index backfiller.
    */
-  static collectionReadTimeIndex = 'collectionReadTimeIndex';
+  static collectionGroupIndex = 'documentKeyIndex';
 
-  static collectionReadTimeIndexPath = ['parentPath', 'readTime'];
-
-  // TODO: We are currently storing full document keys almost three times
-  // (once as part of the primary key, once - partly - as `parentPath` and once
-  // inside the encoded documents). During our next migration, we should
-  // rewrite the primary key as parentPath + document ID which would allow us
-  // to drop one value.
+  static collectionGroupIndexPath = [
+    'collectionGroup',
+    'readTime',
+    'documentId'
+  ];
 
   constructor(
+    /** The path to the document's collection (excluding). */
+    public prefixPath: string[],
+
+    /** The collection ID the document is direclty nested under. */
+    public collectionGroup: string,
+
+    /** The document ID. */
+    public documentId: string,
+
+    /** When the document was read from the backend. */
+    public readTime: DbTimestampKey,
+
     /**
      * Set to an instance of DbUnknownDocument if the data for a document is
      * not known, but it is known that a document exists at the specified
@@ -358,19 +381,7 @@ export class DbRemoteDocument {
      * documents are potentially inconsistent with the backend's copy and use
      * the write's commit version as their document version.
      */
-    public hasCommittedMutations: boolean | undefined,
-
-    /**
-     * When the document was read from the backend. Undefined for data written
-     * prior to schema version 9.
-     */
-    public readTime: DbTimestampKey | undefined,
-
-    /**
-     * The path of the collection this document is part of. Undefined for data
-     * written prior to schema version 9.
-     */
-    public parentPath: string[] | undefined
+    public hasCommittedMutations: boolean | undefined
   ) {}
 }
 
@@ -907,7 +918,9 @@ export const V11_STORES = [...V8_STORES, DbBundle.store, DbNamedQuery.store];
 
 export const V12_STORES = [...V11_STORES, DbDocumentOverlay.store];
 
-export const V13_STORES = [
+// V13 does not change the set of stores.
+
+export const V14_STORES = [
   ...V12_STORES,
   DbIndexConfiguration.store,
   DbIndexState.store,
@@ -923,9 +936,9 @@ export const ALL_STORES = V12_STORES;
 
 /** Returns the object stores for the provided schema. */
 export function getObjectStores(schemaVersion: number): string[] {
-  if (schemaVersion === 13) {
-    return V13_STORES;
-  } else if (schemaVersion === 12) {
+  if (schemaVersion === 14) {
+    return V14_STORES;
+  } else if (schemaVersion === 12 || schemaVersion === 13) {
     return V12_STORES;
   } else if (schemaVersion === 11) {
     return V11_STORES;

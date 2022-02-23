@@ -27,7 +27,7 @@ import { FieldPath } from './path';
  * The initial mutation batch id for each index. Gets updated during index
  * backfill.
  */
-const INITIAL_LARGEST_BATCH_ID = -1;
+export const INITIAL_LARGEST_BATCH_ID = -1;
 
 /**
  * The initial sequence number for each index. Gets updated during index
@@ -169,7 +169,7 @@ export class IndexState {
  * Creates an offset that matches all documents with a read time higher than
  * `readTime`.
  */
-export function newIndexOffsetSuccessorFromReadTime(
+export function newIndexOffsetSuccessor(
   readTime: SnapshotVersion,
   largestBatchId: number
 ): IndexOffset {
